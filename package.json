@@ -1,0 +1,28 @@
+{
+  "name": "ariadne",
+  "version": "0.0.1",
+  "description": "bolt driven schema models for neo4j",
+  "main": "index.js",
+  "dependencies": {
+    "neo4j-driver": "^1.0.0"
+  },
+  "devDependencies": {
+    "jasmine": "^2.4.1"
+  },
+  "scripts": {
+    "test": "jasmine"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/swist/ariadne.git"
+  },
+  "keywords": [
+    "neo4j"
+  ],
+  "author": "Tomasz Nguyen",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/swist/ariadne/issues"
+  },
+  "homepage": "https://github.com/swist/ariadne#readme"
+}
