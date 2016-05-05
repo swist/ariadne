@@ -9,8 +9,7 @@ class Foo extends Bar {}
 
 describe('Model', function () {
   it('should return the list of labels for the prototype chain', () => {
-    let m = new Foo()
-    let foo = m.labels()
-    expect(foo).toEqual(['Foo', 'Bar'])
+    let labels = Foo.labels()
+    expect(labels).toEqual(['Foo', 'Bar'])
   })
 })
