@@ -149,75 +149,79 @@ def _listing_line(i: int, l: Listing) -> str:
 
 # ── Site search scrapers ───────────────────────────────────────────────────────
 
-async def _search_autotrader(c: Criteria, s: AsyncSession, limit: int) -> list[Listing]:
-    params: dict[str, str] = {
+def _autotrader_base_params(c: Criteria) -> dict[str, str]:
+    """Build the non-make/model AutoTrader query params from criteria."""
+    p: dict[str, str] = {
         "postcode": c.postcode.replace(" ", ""),
         "radius": str(c.radius_miles),
         "onesearchad": "Used",
         "sort": "relevance",
     }
-    if c.makes:
-        params["make"] = c.makes[0].upper()
-    if c.models:
-        params["model"] = c.models[0].upper()
     if c.min_year:
-        params["year-from"] = str(c.min_year)
+        p["year-from"] = str(c.min_year)
     if c.max_year:
-        params["year-to"] = str(c.max_year)
+        p["year-to"] = str(c.max_year)
     if c.min_price:
-        params["price-from"] = str(c.min_price)
+        p["price-from"] = str(c.min_price)
     if c.max_price:
-        params["price-to"] = str(c.max_price)
+        p["price-to"] = str(c.max_price)
     if c.max_mileage:
-        params["mileage-to"] = str(c.max_mileage)
+        p["mileage-to"] = str(c.max_mileage)
     if c.fuel_type:
-        params["fuel-type"] = c.fuel_type.capitalize()
+        p["fuel-type"] = c.fuel_type.capitalize()
     if c.transmission:
-        params["transmission"] = c.transmission.capitalize()
+        p["transmission"] = c.transmission.capitalize()
     if c.keywords:
-        params["keywords"] = c.keywords.replace(" ", "+")
+        p["keywords"] = c.keywords.replace(" ", "+")
+    return p
 
+
+def _autotrader_parse_raw(raw: list, limit: int) -> list[Listing]:
+    out = []
+    for item in raw[:limit]:
+        p_obj = item.get("price") or {}
+        price = (
+            (p_obj.get("retailPriceLabel") or p_obj.get("purchasePriceLabel"))
+            if isinstance(p_obj, dict) else None
+        ) or _gbp((p_obj.get("retailPrice") or p_obj.get("purchasePrice")) if isinstance(p_obj, dict) else p_obj)
+        advert_id = item.get("id", "")
+        href = f"https://www.autotrader.co.uk/car-details/{advert_id}" if advert_id else ""
+        specs = item.get("keyFeatures") or []
+        loc = item.get("location") or {}
+        location = (loc.get("town") or loc.get("postCode", "")) if isinstance(loc, dict) else str(loc)
+        out.append(Listing(
+            title=item.get("heading") or f"{item.get('make','')} {item.get('model','')}".strip(),
+            price=price,
+            url=href,
+            source="AutoTrader UK",
+            year=item.get("year"),
+            mileage=_miles(item.get("mileage")),
+            location=location,
+            fuel=next((x for x in specs if any(f in x.lower() for f in ["petrol","diesel","electric","hybrid"])), None),
+            transmission=next((x for x in specs if any(t in x.lower() for t in ["manual","automatic"])), None),
+        ))
+    return out
+
+
+async def _autotrader_one_query(params: dict[str, str], s: AsyncSession, limit: int) -> list[Listing]:
+    """Run a single AutoTrader search and return listings."""
     url = "https://www.autotrader.co.uk/car-search?" + "&".join(f"{k}={v}" for k, v in params.items())
     r = await s.get(url, headers=_HEADERS)
     data = _next_data(r.text)
     pp = _dig(data, "props", "pageProps") or {}
 
-    # AutoTrader Next.js — try several known data paths
     raw = (
         _dig(pp, "initialState", "inventory", "listings") or
         _dig(pp, "searchResults", "advertSummaries") or
         _dig(pp, "advertSummaries") or
         []
     )
-
     if raw:
-        out = []
-        for item in raw[:limit]:
-            p_obj = item.get("price") or {}
-            price = (
-                (p_obj.get("retailPriceLabel") or p_obj.get("purchasePriceLabel"))
-                if isinstance(p_obj, dict) else None
-            ) or _gbp((p_obj.get("retailPrice") or p_obj.get("purchasePrice")) if isinstance(p_obj, dict) else p_obj)
-            advert_id = item.get("id", "")
-            href = f"https://www.autotrader.co.uk/car-details/{advert_id}" if advert_id else ""
-            specs = item.get("keyFeatures") or []
-            loc = item.get("location") or {}
-            location = (loc.get("town") or loc.get("postCode", "")) if isinstance(loc, dict) else str(loc)
-            out.append(Listing(
-                title=item.get("heading") or f"{item.get('make','')} {item.get('model','')}".strip(),
-                price=price,
-                url=href,
-                source="AutoTrader UK",
-                year=item.get("year"),
-                mileage=_miles(item.get("mileage")),
-                location=location,
-                fuel=next((x for x in specs if any(f in x.lower() for f in ["petrol","diesel","electric","hybrid"])), None),
-                transmission=next((x for x in specs if any(t in x.lower() for t in ["manual","automatic"])), None),
-            ))
+        out = _autotrader_parse_raw(raw, limit)
         if out:
             return out
 
-    # HTML fallback — stable structural selectors
+    # HTML fallback
     soup = BeautifulSoup(r.text, "html.parser")
     out = []
     for article in soup.select("li[data-advert-id], article[data-standout-type]")[:limit]:
@@ -237,6 +241,54 @@ async def _search_autotrader(c: Criteria, s: AsyncSession, limit: int) -> list[L
             location=loc_el.get_text(strip=True) if loc_el else "",
         ))
     return out
+
+
+async def _search_autotrader(c: Criteria, s: AsyncSession, limit: int) -> list[Listing]:
+    base = _autotrader_base_params(c)
+
+    # AutoTrader only accepts one make per request — fan out if multiple makes given,
+    # pairing each make with any corresponding model (or no model if lists differ in length).
+    if len(c.makes) <= 1:
+        params = dict(base)
+        if c.makes:
+            params["make"] = c.makes[0].upper()
+        if c.models:
+            params["model"] = c.models[0].upper()
+        return await _autotrader_one_query(params, s, limit)
+
+    # Multiple makes: run one query per make, interleave results up to `limit` total.
+    per_make = max(3, limit // len(c.makes))
+    tasks = []
+    for i, make in enumerate(c.makes):
+        params = dict(base)
+        params["make"] = make.upper()
+        # Pair with same-index model if available
+        if i < len(c.models):
+            params["model"] = c.models[i].upper()
+        tasks.append(_autotrader_one_query(params, s, per_make))
+
+    batches = await asyncio.gather(*tasks, return_exceptions=True)
+
+    # Interleave results round-robin so output isn't make-grouped
+    seen: set[str] = set()
+    merged: list[Listing] = []
+    iters = [iter(b) for b in batches if isinstance(b, list)]
+    while len(merged) < limit and iters:
+        exhausted = []
+        for it in iters:
+            try:
+                listing = next(it)
+                if listing.url not in seen:
+                    seen.add(listing.url)
+                    merged.append(listing)
+            except StopIteration:
+                exhausted.append(it)
+        for it in exhausted:
+            iters.remove(it)
+        if not iters:
+            break
+
+    return merged[:limit]
 
 
 async def _search_pistonheads(c: Criteria, s: AsyncSession, limit: int) -> list[Listing]:
